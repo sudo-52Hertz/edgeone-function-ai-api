@@ -1,16 +1,15 @@
 // ============================================================
-// EdgeOne Function - AI API 中转站
-// 文件路径: edge-functions/v1/[[default]].js  (捕获 /v1/* 所有路由)
-// 或: edge-functions/index.js (根路径，配合路由规则使用)
+// EdgeOne Edge Function - AI API 中转站
+// （由 Cloudflare Worker 版转换，适配 EdgeOne 边缘函数运行时）
 // ============================================================
 
 // ------------------------------------------------------------
-// 1. 提供商配置 (通过 EdgeOne 环境变量 PROVIDERS 存储, JSON 格式)
-//    在 EdgeOne 控制台 → 边缘函数 → 环境变量 中设置
-//    变量类型: JSON (EdgeOne 会自动解析为 JS 对象，无需 JSON.parse)
+// 1. 提供商配置（通过环境变量 PROVIDERS 存储，JSON 格式）
+//    在 EdgeOne 控制台 → 边缘函数 → 函数管理 → 环境变量与密钥 中设置
 //
 //    变量名: PROVIDERS
-//    变量值示例 (JSON):
+//    变量类型: 建议使用 JSON（自动解析为对象）或 String
+//    变量值示例:
 //    [
 //      {
 //        "id": "openai",
@@ -47,22 +46,22 @@
 //    ]
 //
 //    字段说明:
-//    - id:       提供商标识 (唯一, 英文)
-//    - name:     提供商名称 (显示用)
-//    - format:   API格式, 可选 "openai" 或 "anthropic"
-//    - baseURL:  提供商的API基础地址 (不含末尾斜杠)
-//    - apiKey:   提供商的API密钥
-//    - models:   手动指定模型列表(可选), 为 null 则自动从提供商获取
+//    - id:       提供商标识（唯一，英文）
+//    - name:     提供商名称（显示用）
+//    - format:   API 格式，可选 "openai" 或 "anthropic"
+//    - baseURL:  提供商的 API 基础地址（不含末尾斜杠）
+//    - apiKey:   提供商的 API 密钥
+//    - models:   手动指定模型列表（可选），为 null 则自动从提供商获取
 //
 // ------------------------------------------------------------
 
 // ------------------------------------------------------------
-// 2. 用户密钥配置 (通过 EdgeOne 环境变量 USER_KEYS 存储, JSON 格式)
-//    在 EdgeOne 控制台 → 边缘函数 → 环境变量 中设置
-//    建议变量类型设为 Secret 以加密存储
+// 2. 用户密钥配置（通过环境变量 USER_KEYS 存储，JSON 格式）
+//    建议使用 Secret 类型以加密存储
 //
 //    变量名: USER_KEYS
-//    变量值示例 (JSON):
+//    变量类型: 建议使用 JSON 或 Secret
+//    变量值示例:
 //    [
 //      {
 //        "key": "sk-my-proxy-key-001",
@@ -81,11 +80,11 @@
 //    ]
 //
 //    字段说明:
-//    - key:              用户使用的API密钥 (自定义, 无格式限制)
+//    - key:              用户使用的 API 密钥（自定义，无格式限制）
 //    - name:             用户名称/备注
 //    - enabled:          是否启用
-//    - rateLimit:        每分钟请求上限 (0 = 不限制)
-//    - allowedProviders: 允许使用的提供商列表, null = 全部允许
+//    - rateLimit:        每分钟请求上限（0 = 不限制）
+//    - allowedProviders: 允许使用的提供商列表，null = 全部允许
 //
 // ------------------------------------------------------------
 
@@ -95,13 +94,13 @@
 
 /**
  * 解析环境变量中的 JSON 配置
- * EdgeOne JSON 类型环境变量会自动解析为 JS 对象
- * 但为兼容 String 类型，保留解析逻辑
+ * 兼容 EdgeOne 环境变量：JSON 类型自动解析为对象，String 类型需手动解析
  */
 function parseEnvJSON(envVar, fallback) {
-  if (!envVar) return fallback;
-  // EdgeOne JSON 类型已自动解析为对象/数组
+  if (envVar === undefined || envVar === null) return fallback;
+  // EdgeOne JSON 类型环境变量已自动解析为对象
   if (typeof envVar === 'object') return envVar;
+  // String 类型环境变量为 JSON 字符串，需手动解析
   try {
     return JSON.parse(envVar);
   } catch (e) {
@@ -112,15 +111,16 @@ function parseEnvJSON(envVar, fallback) {
 
 /**
  * 加载并验证提供商配置
+ * EdgeOne 中 env 为全局变量，直接访问
  */
-function loadProviders(env) {
+function loadProviders() {
   return parseEnvJSON(env.PROVIDERS, []);
 }
 
 /**
  * 加载并验证用户密钥配置
  */
-function loadUserKeys(env) {
+function loadUserKeys() {
   return parseEnvJSON(env.USER_KEYS, []);
 }
 
@@ -138,11 +138,11 @@ function authenticateUser(request, userKeys) {
 
 /**
  * 根据模型名称查找对应的提供商
- * 策略: 遍历所有提供商，检查模型是否在其可用模型列表中
- * 也支持通过 model 名称前缀匹配 (如 "openai:gpt-4" 显式指定提供商)
+ * 策略：遍历所有提供商，检查模型是否在其可用模型列表中
+ * 也支持通过 model 名称前缀匹配（如 "openai:gpt-4" 显式指定提供商）
  */
-async function resolveProvider(model, providers, env) {
-  // 支持显式指定: "provider_id:model_name"
+async function resolveProvider(model, providers) {
+  // 支持显式指定："provider_id:model_name"
   if (model && model.includes(':')) {
     const [providerId, ...rest] = model.split(':');
     const actualModel = rest.join(':');
@@ -152,9 +152,9 @@ async function resolveProvider(model, providers, env) {
     }
   }
 
-  // 自动匹配: 遍历提供商查找模型
+  // 自动匹配：遍历提供商查找模型
   for (const provider of providers) {
-    const models = await getProviderModels(provider, env);
+    const models = await getProviderModels(provider);
     if (models.includes(model)) {
       return { provider, actualModel: model };
     }
@@ -171,18 +171,18 @@ async function resolveProvider(model, providers, env) {
 /**
  * 获取提供商的可用模型列表
  * 优先使用手动配置，否则自动请求提供商 /models 端点
- * 结果缓存在内存中 (EdgeOne 每个请求独立实例，内存缓存仅当前请求有效)
+ * 结果缓存在内存中（实例级别，EdgeOne 各实例独立缓存）
  */
 const modelCache = new Map();
-const CACHE_TTL = 10 * 60 * 1000; // 10分钟缓存
+const CACHE_TTL = 10 * 60 * 1000; // 10 分钟缓存
 
-async function getProviderModels(provider, env) {
+async function getProviderModels(provider) {
   // 如果手动指定了模型列表，直接使用
   if (provider.models && Array.isArray(provider.models) && provider.models.length > 0) {
     return provider.models;
   }
 
-  // 检查内存缓存
+  // 检查缓存
   const cacheKey = provider.id;
   const cached = modelCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
@@ -208,8 +208,7 @@ async function fetchModelsFromProvider(provider) {
   const headers = {};
 
   if (provider.format === 'anthropic') {
-    // Anthropic 没有标准的 /models 端点，使用手动配置或返回空
-    // 但较新版本已支持 GET /v1/models
+    // Anthropic 格式
     headers['x-api-key'] = provider.apiKey;
     headers['anthropic-version'] = '2023-06-01';
   } else {
@@ -219,10 +218,18 @@ async function fetchModelsFromProvider(provider) {
 
   const url = `${provider.baseURL}/models`;
 
+  // 注意：EdgeOne 不支持 cf 参数（Cloudflare 特有），此处移除
   const response = await fetch(url, {
     method: 'GET',
-    headers
-    // EdgeOne 不支持 Cloudflare 特有的 cf: { cacheTtl: 300 } 选项
+    headers,
+    // 如需设置超时，可参考以下方式（单位：毫秒）：
+    // eo: {
+    //   timeoutSetting: {
+    //     connectTimeout: 5000,
+    //     readTimeout: 10000,
+    //     writeTimeout: 5000
+    //   }
+    // }
   });
 
   if (!response.ok) {
@@ -244,13 +251,13 @@ async function fetchModelsFromProvider(provider) {
 }
 
 /**
- * 聚合所有提供商的模型列表 (用于 /v1/models 端点)
+ * 聚合所有提供商的模型列表（用于 /v1/models 端点）
  */
-async function getAggregatedModels(providers, env) {
+async function getAggregatedModels(providers) {
   const allModels = [];
 
   for (const provider of providers) {
-    const models = await getProviderModels(provider, env);
+    const models = await getProviderModels(provider);
     for (const modelId of models) {
       allModels.push({
         id: modelId,
@@ -270,7 +277,7 @@ async function getAggregatedModels(providers, env) {
 /**
  * 构建转发给 OpenAI 兼容提供商的请求
  */
-function buildOpenAIRequest(provider, actualModel, body, request) {
+function buildOpenAIRequest(provider, actualModel, body) {
   const headers = {
     'Content-Type': 'application/json',
     'Authorization': `Bearer ${provider.apiKey}`
@@ -288,7 +295,7 @@ function buildOpenAIRequest(provider, actualModel, body, request) {
  * 构建转发给 Anthropic 提供商的请求
  * 将 OpenAI 格式转换为 Anthropic 格式
  */
-function buildAnthropicRequest(provider, actualModel, body, request) {
+function buildAnthropicRequest(provider, actualModel, body) {
   const headers = {
     'Content-Type': 'application/json',
     'x-api-key': provider.apiKey,
@@ -326,10 +333,9 @@ function openAIToAnthropic(openAIBody, model) {
           if (part.type === 'text') {
             return { type: 'text', text: part.text };
           } else if (part.type === 'image_url') {
-            // 转换 image_url 为 Anthropic 的 image 格式
             const url = part.image_url?.url || '';
             if (url.startsWith('data:')) {
-              const match = url.match(/^data:(image/\w+);base64,(.+)$/);
+              const match = url.match(/^data:(image\/\w+);base64,(.+)$/);
               if (match) {
                 return {
                   type: 'image',
@@ -367,16 +373,14 @@ function openAIToAnthropic(openAIBody, model) {
 }
 
 /**
- * Anthropic 响应 → OpenAI 响应格式 (非流式)
+ * Anthropic 响应 → OpenAI 响应格式（非流式）
  */
 function anthropicToOpenAI(anthropicResponse, model) {
-  const content = [];
   let textContent = '';
 
   for (const block of anthropicResponse.content || []) {
     if (block.type === 'text') {
       textContent += block.text;
-      content.push({ type: 'text', text: block.text });
     }
   }
 
@@ -403,14 +407,13 @@ function anthropicToOpenAI(anthropicResponse, model) {
 
 /**
  * Anthropic 流式响应 → OpenAI 流式格式
+ * 使用 async generator 逐块转换
  */
 async function* convertAnthropicStream(response, model) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   const completionId = `chatcmpl-${crypto.randomUUID()}`;
-  let promptTokens = 0;
-  let completionTokens = 0;
 
   // 发送初始 chunk
   yield `data: ${JSON.stringify({
@@ -442,7 +445,6 @@ async function* convertAnthropicStream(response, model) {
 
           if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
             const text = event.delta.text;
-            completionTokens += Math.ceil(text.length / 4); // 粗略估算
 
             yield `data: ${JSON.stringify({
               id: completionId,
@@ -455,14 +457,6 @@ async function* convertAnthropicStream(response, model) {
                 finish_reason: null
               }]
             })}\n\n`;
-          }
-
-          if (event.type === 'message_start' && event.message?.usage) {
-            promptTokens = event.message.usage.input_tokens || 0;
-          }
-
-          if (event.type === 'message_delta' && event.usage) {
-            completionTokens = event.usage.output_tokens || completionTokens;
           }
 
           if (event.type === 'message_stop') {
@@ -502,9 +496,9 @@ function mapAnthropicStopReason(reason) {
 }
 
 /**
- * 处理流式转发 (OpenAI 兼容提供商直接透传)
+ * 处理流式转发（OpenAI 兼容提供商直接透传）
  */
-async function handleStreamPassthrough(response) {
+function handleStreamPassthrough(response) {
   return new Response(response.body, {
     status: response.status,
     headers: {
@@ -518,22 +512,31 @@ async function handleStreamPassthrough(response) {
 
 /**
  * 处理 Anthropic 流式响应的格式转换
+ *
+ * 注意：EdgeOne 边缘函数不支持直接构造 ReadableStream，
+ * 改用 TransformStream 实现流式输出
  */
 async function handleAnthropicStream(response, model) {
   const generator = convertAnthropicStream(response, model);
 
-  const stream = new ReadableStream({
-    async pull(controller) {
-      const { value, done } = await generator.next();
-      if (done) {
-        controller.close();
-        return;
-      }
-      controller.enqueue(new TextEncoder().encode(value));
-    }
-  });
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+  const encoder = new TextEncoder();
 
-  return new Response(stream, {
+  // 异步将 generator 输出写入 TransformStream
+  (async () => {
+    try {
+      for await (const chunk of generator) {
+        await writer.write(encoder.encode(chunk));
+      }
+    } catch (e) {
+      console.error('Anthropic 流转换错误:', e.message);
+    } finally {
+      await writer.close();
+    }
+  })();
+
+  return new Response(readable, {
     status: 200,
     headers: {
       'Content-Type': 'text/event-stream',
@@ -545,9 +548,8 @@ async function handleAnthropicStream(response, model) {
 }
 
 /**
- * 简单的速率限制 (基于内存, EdgeOne 实例级别)
- * 注意: EdgeOne 每个请求可能在不同实例上执行，内存级限流仅对同一实例有效
- * 如需全局限流，建议使用 EdgeOne KV 存储
+ * 简单的速率限制（基于内存，实例级别）
+ * 注意：EdgeOne 各实例独立，速率限制为近似值
  */
 const rateLimitMap = new Map();
 
@@ -555,7 +557,7 @@ function checkRateLimit(userId, limit) {
   if (!limit || limit <= 0) return true;
 
   const now = Date.now();
-  const windowMs = 60 * 1000; // 1分钟窗口
+  const windowMs = 60 * 1000; // 1 分钟窗口
 
   if (!rateLimitMap.has(userId)) {
     rateLimitMap.set(userId, []);
@@ -596,8 +598,8 @@ function errorResponse(message, statusCode = 400, type = 'invalid_request_error'
 // 路由处理
 // ============================================================
 
-async function handleModelsRequest(providers, env) {
-  const models = await getAggregatedModels(providers, env);
+async function handleModelsRequest(providers) {
+  const models = await getAggregatedModels(providers);
   return new Response(JSON.stringify({
     object: 'list',
     data: models
@@ -606,7 +608,7 @@ async function handleModelsRequest(providers, env) {
   });
 }
 
-async function handleChatCompletionsRequest(request, providers, env, user) {
+async function handleChatCompletionsRequest(request, providers, user) {
   let body;
   try {
     body = await request.json();
@@ -620,7 +622,7 @@ async function handleChatCompletionsRequest(request, providers, env, user) {
   }
 
   // 解析提供商
-  const resolved = await resolveProvider(model, providers, env);
+  const resolved = await resolveProvider(model, providers);
   if (!resolved) {
     return errorResponse('无法找到匹配的提供商，请检查 PROVIDERS 配置', 500, 'server_error');
   }
@@ -642,18 +644,25 @@ async function handleChatCompletionsRequest(request, providers, env, user) {
   // 根据提供商格式构建请求
   let reqConfig;
   if (provider.format === 'anthropic') {
-    reqConfig = buildAnthropicRequest(provider, actualModel, body, request);
+    reqConfig = buildAnthropicRequest(provider, actualModel, body);
   } else {
-    reqConfig = buildOpenAIRequest(provider, actualModel, body, request);
+    reqConfig = buildOpenAIRequest(provider, actualModel, body);
   }
 
-  // 转发请求
+  // 转发请求（配置超时以支持流式场景，单位：毫秒）
   let providerResponse;
   try {
     providerResponse = await fetch(reqConfig.url, {
       method: 'POST',
       headers: reqConfig.headers,
-      body: JSON.stringify(reqConfig.body)
+      body: JSON.stringify(reqConfig.body),
+      eo: {
+        timeoutSetting: {
+          connectTimeout: 10000,  // 连接超时 10 秒
+          readTimeout: 120000,    // 读取超时 120 秒（支持流式长连接）
+          writeTimeout: 10000     // 发送超时 10 秒
+        }
+      }
     });
   } catch (e) {
     return errorResponse(`请求提供商 ${provider.id} 失败: ${e.message}`, 502, 'upstream_error');
@@ -694,18 +703,21 @@ async function handleChatCompletionsRequest(request, providers, env, user) {
 }
 
 // ============================================================
-// EdgeOne Function 主入口
-// ============================================================
-// EdgeOne 使用 onRequest 处理函数，context 包含:
-//   - request: 客户端请求对象
-//   - env: 环境变量
-//   - params: 动态路由参数
-//   - waitUntil: 延长事件生命周期
+// 主入口
 // ============================================================
 
-export default async function onRequest(context) {
-  const { request, env } = context;
+/**
+ * 添加 CORS 头的辅助函数
+ */
+function withCORS(response) {
+  const newResponse = new Response(response.body, response);
+  newResponse.headers.set('Access-Control-Allow-Origin', '*');
+  newResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  newResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  return newResponse;
+}
 
+async function handleRequest(request) {
   // CORS 预检
   if (request.method === 'OPTIONS') {
     return new Response(null, {
@@ -721,21 +733,11 @@ export default async function onRequest(context) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  // 添加 CORS 头的辅助函数
-  function withCORS(response) {
-    const newResponse = new Response(response.body, response);
-    newResponse.headers.set('Access-Control-Allow-Origin', '*');
-    newResponse.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    newResponse.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    return newResponse;
-  }
-
   // 根路径信息
   if (pathname === '/' || pathname === '') {
     return withCORS(new Response(JSON.stringify({
       name: 'AI API Proxy',
       version: '1.0.0',
-      platform: 'EdgeOne Function',
       endpoints: {
         models: '/v1/models',
         chat_completions: '/v1/chat/completions'
@@ -751,8 +753,8 @@ export default async function onRequest(context) {
   }
 
   // 加载配置
-  const providers = loadProviders(env);
-  const userKeys = loadUserKeys(env);
+  const providers = loadProviders();
+  const userKeys = loadUserKeys();
 
   // 验证配置
   if (providers.length === 0) {
@@ -768,16 +770,25 @@ export default async function onRequest(context) {
   // 路由分发
   // GET /v1/models - 获取模型列表
   if (pathname === '/v1/models' && request.method === 'GET') {
-    const response = await handleModelsRequest(providers, env);
+    const response = await handleModelsRequest(providers);
     return withCORS(response);
   }
 
   // POST /v1/chat/completions - 对话补全
   if (pathname === '/v1/chat/completions' && request.method === 'POST') {
-    const response = await handleChatCompletionsRequest(request, providers, env, user);
+    const response = await handleChatCompletionsRequest(request, providers, user);
     return withCORS(response);
   }
 
   // 未匹配的路由
   return withCORS(errorResponse('未找到该端点', 404, 'not_found'));
 }
+
+// ============================================================
+// EdgeOne 边缘函数入口
+// 使用 addEventListener 注册 fetch 事件
+// EdgeOne 底层边缘函数不支持 export default 模块格式的 fetch 入口
+// ============================================================
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request));
+});
